@@ -1,0 +1,1081 @@
+/// <reference types="vite/client" />
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { Ticket, User, AuditLog, AppNotification } from './types';
+import { SEEDED_USERS, DEFAULT_REGIONS, SEEDED_TICKETS } from './initialData';
+import { DeliverableForm } from './components/DeliverableForm';
+import { DeliverableTable } from './components/DeliverableTable';
+import { AnalyticsDashboard } from './components/AnalyticsDashboard';
+import { EodReportPanel } from './components/EodReportPanel';
+import { AuditLogsTable } from './components/AuditLogsTable';
+import { LoginSignup } from './components/LoginSignup';
+import { StatsOverview } from './components/StatsOverview';
+import { AdminAccountsPanel } from './components/AdminAccountsPanel';
+import { AdminNotificationsPanel } from './components/AdminNotificationsPanel';
+import { AdminBandwidthPanel } from './components/AdminBandwidthPanel';
+import {
+  Briefcase, Shield, User as UserIcon, LogOut, FileSpreadsheet,
+  Clock, History, BarChart3, HelpCircle, AlertCircle, Globe, X, Plus, Home, Bell, Users
+} from 'lucide-react';
+import { syncFromGoogleSheet } from './excelUtils';
+import { SPREADSHEET_ID } from './googleSheetsUtils';
+
+export default function App() {
+  // 1. Current logged-in user state
+  const [currentUser, setCurrentUser] = useState<User | null>(() => {
+    try {
+      const saved = localStorage.getItem('current_logged_in_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch (e) {
+      return null;
+    }
+  });
+
+  // 2. Main ticket list state
+  const [tickets, setTickets] = useState<Ticket[]>(() => {
+    const saved = localStorage.getItem('corporate_tickets');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        return SEEDED_TICKETS;
+      }
+    }
+    return SEEDED_TICKETS;
+  });
+
+  // 3. Admin-customizable Regions state ( APAC, EMEA, AMER, India as seed)
+  const [regions, setRegions] = useState<string[]>(() => {
+    const saved = localStorage.getItem('corporate_regions');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        return DEFAULT_REGIONS;
+      }
+    }
+    return DEFAULT_REGIONS;
+  });
+
+  // 4. Audit Log historical state
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => {
+    const saved = localStorage.getItem('corporate_audit_logs');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        return [];
+      }
+    }
+    return [];
+  });
+
+  // 4b. Admin Notifications state
+  const [notifications, setNotifications] = useState<AppNotification[]>(() => {
+    const saved = localStorage.getItem('corporate_notifications');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        return [];
+      }
+    }
+    return [];
+  });
+
+  // 5. Active workspace view tab
+  const [activeTab, setActiveTab] = useState<'myTasks' | 'teamTasks' | 'sheet' | 'dashboard' | 'bandwidth' | 'eod' | 'logs' | 'accounts' | 'notifications'>('myTasks');
+
+  // Set default tab for Admin to dashboard on login
+  useEffect(() => {
+    if (currentUser) {
+      if (currentUser.role === 'Admin') {
+        setActiveTab('dashboard');
+      } else {
+        setActiveTab('myTasks');
+      }
+    }
+  }, [currentUser]);
+
+  // 6. Currently selected ticket for edit panel
+  const [editingTicket, setEditingTicket] = useState<Ticket | null>(null);
+  const [isFormModalOpen, setIsFormModalOpen] = useState(false);
+
+  // 7. Master Spreadsheet Google backing URL config
+  const [masterSheetUrl, setMasterSheetUrl] = useState<string>(() => {
+    return localStorage.getItem('master_sheet_url') || '';
+  });
+  const [isEditingUrl, setIsEditingUrl] = useState(false);
+  const [urlInput, setUrlInput] = useState(masterSheetUrl);
+
+  // 8. Custom toast alert notification state
+  const [notification, setNotification] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
+
+  // Save changes to localStorage
+  useEffect(() => {
+    localStorage.setItem('corporate_tickets', JSON.stringify(tickets));
+  }, [tickets]);
+
+  useEffect(() => {
+    localStorage.setItem('corporate_regions', JSON.stringify(regions));
+  }, [regions]);
+
+  useEffect(() => {
+    localStorage.setItem('corporate_audit_logs', JSON.stringify(auditLogs));
+  }, [auditLogs]);
+
+  useEffect(() => {
+    localStorage.setItem('corporate_notifications', JSON.stringify(notifications));
+  }, [notifications]);
+
+  // Ensure our user seed database is stored in localStorage so DeliverableForm can query it
+  useEffect(() => {
+    const savedUsers = localStorage.getItem('corporate_users');
+    if (!savedUsers) {
+      localStorage.setItem('corporate_users', JSON.stringify(SEEDED_USERS));
+    } else {
+      try {
+        const parsed = JSON.parse(savedUsers);
+        const existingIds = new Set(parsed.map((u: any) => u.id));
+        const toAdd = SEEDED_USERS.filter(u => !existingIds.has(u.id));
+        if (toAdd.length > 0) {
+          localStorage.setItem('corporate_users', JSON.stringify([...parsed, ...toAdd]));
+        }
+      } catch (e) {
+        console.error('Failed to parse corporate_users from localStorage, resetting to default seed data:', e);
+        localStorage.setItem('corporate_users', JSON.stringify(SEEDED_USERS));
+      }
+    }
+  }, []);
+
+  // Helper to trigger toast notification
+  const triggerNotification = useCallback((text: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setNotification({ text, type });
+    setTimeout(() => {
+      setNotification(null);
+    }, 4500);
+  }, []);
+
+  // Helper to add a system audit log record
+  const addAuditLog = useCallback((
+    action: AuditLog['action'],
+    ticketName: string,
+    details: string,
+    reason: string = ''
+  ) => {
+    if (!currentUser) return;
+
+    const newLog: AuditLog = {
+      id: `log-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+      timestamp: new Date().toISOString(),
+      fullName: currentUser.fullName,
+      empId: (() => {
+        try {
+          const allUsers = JSON.parse(localStorage.getItem('corporate_users') || '[]');
+          const fullUser = allUsers.find((u: any) => u.id === currentUser.id);
+          if (fullUser) {
+            if (fullUser.id === 'admin') return 'admin';
+            return fullUser.empId || fullUser.id || 'EMP-MEMBER';
+          }
+        } catch (e) {
+          console.error('Failed to parse corporate_users for audit log:', e);
+        }
+        return currentUser.id === 'admin' ? 'admin' : 'EMP-MEMBER';
+      })(),
+      role: currentUser.role,
+      action,
+      ticketName,
+      details,
+      reason: reason || undefined
+    };
+
+    setAuditLogs(prev => [newLog, ...prev]);
+  }, [currentUser]);
+
+  const handleLogout = () => {
+    if (currentUser) {
+      triggerNotification(`Goodbye, ${currentUser.fullName}. Secure session terminated.`, 'info');
+    }
+    setCurrentUser(null);
+    localStorage.removeItem('current_logged_in_user');
+  };
+
+  // 9. Generate incremental team ticket prefix counters (Section 5: auto-generated ticketId)
+  const generateTicketId = (team: 'Personality' | 'Cognitive') => {
+    const prefix = team === 'Cognitive' ? 'COG' : 'PSY';
+    const teamTickets = tickets.filter(t => t.ticketId.startsWith(prefix));
+    let maxNum = 1000;
+
+    teamTickets.forEach(t => {
+      const match = t.ticketId.match(/\d+/);
+      if (match) {
+        const num = parseInt(match[0], 10);
+        if (num > maxNum) {
+          maxNum = num;
+        }
+      }
+    });
+    return `${prefix}-${maxNum + 1}`;
+  };
+
+  // 10. CRUD State Mutation Handlers
+  const handleAddTicket = (formData: Omit<Ticket, 'id' | 'createdAt'>) => {
+    const newId = `t-${Date.now()}`;
+
+    const newTicket: Ticket = {
+      ...formData,
+      id: newId,
+      createdAt: new Date().toISOString()
+    };
+
+    setTickets(prev => [newTicket, ...prev]);
+
+    // Log ticket creation
+    addAuditLog(
+      'Create',
+      newTicket.ticketId,
+      `Created ticket for client "${newTicket.clientName}" under "${newTicket.team}" team. Assigned: ${newTicket.assignedTo}, Reviewer: ${newTicket.reviewerName}.`
+    );
+
+    triggerNotification(`Created ticket ${newTicket.ticketId} successfully!`, 'success');
+  };
+
+  const handleUpdateTicket = (updated: Ticket, reason?: string) => {
+    const original = tickets.find(t => t.id === updated.id);
+    if (!original) return;
+
+    // PHASE 3 — Server-side role enforcement:
+    // Regular Users may ONLY modify Comments, Delivery Date, and Due Date. Reject any other field change.
+    if (currentUser && currentUser.role !== 'Admin') {
+      const illegalChange =
+        original.clientName !== updated.clientName ||
+        original.deliverableType !== updated.deliverableType ||
+        original.assignedTo !== updated.assignedTo ||
+        original.reviewerName !== updated.reviewerName ||
+        original.status !== updated.status ||
+        original.region !== updated.region ||
+        original.ticketId !== updated.ticketId ||
+        original.team !== updated.team;
+
+      if (illegalChange) {
+        triggerNotification('Access Denied: You are only permitted to edit Comments, Due Date, and Delivery Date.', 'error');
+        return;
+      }
+    }
+
+    // Check if change requires comments auditing or details string formulation
+    const changes: string[] = [];
+    if (original.clientName !== updated.clientName) changes.push(`Client changed to "${updated.clientName}"`);
+    if (original.deliverableType !== updated.deliverableType) changes.push(`Deliverable changed to "${updated.deliverableType}"`);
+    if (original.assignedTo !== updated.assignedTo) changes.push(`Assigned to "${updated.assignedTo}"`);
+    if (original.reviewerName !== updated.reviewerName) changes.push(`Reviewer changed to "${updated.reviewerName}"`);
+    if (original.dueDate !== updated.dueDate) changes.push(`Due date changed to "${updated.dueDate}"`);
+    if (original.status !== updated.status) changes.push(`Status changed to "${updated.status}"`);
+    if (original.comments !== updated.comments) changes.push(`Comments modified`);
+    if (original.region !== updated.region) changes.push(`Region changed to "${updated.region}"`);
+    if (original.deliveryDate !== updated.deliveryDate) changes.push(`Delivery date set to "${updated.deliveryDate}"`);
+
+    const detailsStr = changes.length > 0 ? changes.join(', ') : 'No modifications made.';
+
+    setTickets(prev => prev.map(t => t.id === updated.id ? updated : t));
+    setEditingTicket(null);
+
+    // If delivery date changed and a reason was provided, generate a notification
+    if (original.deliveryDate !== updated.deliveryDate && reason) {
+      const newNotification: AppNotification = {
+        id: `notif-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        ticketId: updated.ticketId,
+        oldDate: original.deliveryDate || 'Not set',
+        newDate: updated.deliveryDate || 'Not set',
+        reason,
+        userId: currentUser?.id || 'Unknown',
+        userName: currentUser?.fullName || 'Unknown User',
+        timestamp: new Date().toISOString(),
+        isRead: false
+      };
+      setNotifications(prev => [newNotification, ...prev]);
+    }
+
+    // Record audit log
+    addAuditLog(
+      'Update',
+      updated.ticketId,
+      detailsStr,
+      reason || 'Routine update'
+    );
+
+    triggerNotification(`Updated ticket ${updated.ticketId} successfully!`, 'success');
+  };
+
+  // Form submission handler
+  const handleFormSubmit = useCallback((incomingTicket: any) => {
+    let ticket = incomingTicket;
+    
+    // If it's a new ticket (no id), generate id and createdAt
+    const isNew = !ticket.id;
+    if (isNew) {
+      ticket = {
+        ...ticket,
+        id: `ticket-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        createdAt: new Date().toISOString()
+      };
+    }
+
+    setTickets(prev => {
+      if (isNew) {
+        return [ticket, ...prev];
+      } else {
+        return prev.map(t => (t.id === ticket.id ? ticket : t));
+      }
+    });
+
+    if (isNew) {
+      addAuditLog('Create', ticket.ticketId, `Created new ticket for client "${ticket.clientName}".`);
+      triggerNotification(`Created ticket ${ticket.ticketId} successfully!`, 'success');
+    } else {
+      addAuditLog('Update', ticket.ticketId, `Updated ticket for client "${ticket.clientName}".`);
+      triggerNotification(`Updated ticket ${ticket.ticketId} successfully!`, 'success');
+    }
+    
+    setEditingTicket(null);
+    setIsFormModalOpen(false);
+  }, [addAuditLog, triggerNotification]);
+
+  const handleEditTicket = useCallback((ticket: Ticket) => {
+    setEditingTicket(ticket);
+    setIsFormModalOpen(true);
+  }, []);
+
+  const handleToggleStatus = useCallback((id: string) => {
+    const STATUS_PIPELINE: Ticket['status'][] = ['In Progress', 'Review Pending', 'Review Approved', 'Delivered'];
+    
+    const target = ticketsRef.current.find(t => t.id === id);
+    if (!target) return;
+
+    const currentIdx = STATUS_PIPELINE.indexOf(target.status);
+    const nextIdx = (currentIdx + 1) % STATUS_PIPELINE.length;
+    const nextStatus = STATUS_PIPELINE[nextIdx];
+
+    setTickets(prev => prev.map(t => t.id === id ? { ...t, status: nextStatus } : t));
+
+    // Log status change
+    addAuditLog(
+      'Status Toggle',
+      target.ticketId,
+      `Status changed from "${target.status}" to "${nextStatus}"`
+    );
+
+    triggerNotification(
+      `Ticket ${target.ticketId} moved to ${nextStatus}`,
+      nextStatus === 'Delivered' ? 'success' : 'info'
+    );
+  }, [addAuditLog, triggerNotification]);
+
+  const handleDeleteTicket = useCallback((id: string) => {
+    // PHASE 3 — Server-side enforcement: Only Admin may delete tickets.
+    if (!currentUser || currentUser.role !== 'Admin') {
+      triggerNotification('Access Denied: Only Admins are permitted to delete tickets.', 'error');
+      return;
+    }
+
+    const target = ticketsRef.current.find(t => t.id === id);
+    if (!target) return;
+
+    setTickets(prev => prev.filter(t => t.id !== id));
+    setEditingTicket(prev => prev?.id === id ? null : prev);
+
+    addAuditLog(
+      'Delete',
+      target.ticketId,
+      `Deleted ticket for client "${target.clientName}" originally assigned to ${target.assignedTo}.`
+    );
+
+    triggerNotification(`Deleted ticket ${target.ticketId}.`, 'info');
+  }, [currentUser, triggerNotification, addAuditLog]);
+
+  // Bulk Excel spreadsheet import handler with options
+  const handleImportTickets = (imported: Ticket[], mode: 'merge' | 'overwrite') => {
+    if (mode === 'overwrite') {
+      setTickets(imported);
+
+      addAuditLog(
+        'Import',
+        'Database Restore',
+        `Overwrote ticket tracking registry entirely with ${imported.length} rows imported from backup Excel file.`
+      );
+
+      triggerNotification(`Spreadsheet backup loaded. Restored ${imported.length} rows.`, 'success');
+    } else {
+      // Merge mode: Skip existing IDs to prevent duplicates
+      const existingIds = new Set(tickets.map(t => t.ticketId.trim().toUpperCase()));
+      const newItems = imported.filter(t => !existingIds.has(t.ticketId.trim().toUpperCase()));
+
+      // Ensure every new item has an active system ID
+      const sanitizedNewItems = newItems.map(t => ({
+        ...t,
+        id: t.id || `t-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        createdAt: t.createdAt || new Date().toISOString()
+      }));
+
+      setTickets(prev => [...sanitizedNewItems, ...prev]);
+      const skippedCount = imported.length - sanitizedNewItems.length;
+
+      addAuditLog(
+        'Import',
+        'Incremental spreadsheet merge',
+        `Merged ${sanitizedNewItems.length} new records from Excel file (skipped ${skippedCount} duplicate ticket IDs).`
+      );
+
+      triggerNotification(
+        `Merged ${sanitizedNewItems.length} new rows (skipped ${skippedCount} duplicates).`,
+        'success'
+      );
+    }
+  };
+
+  const ticketsRef = useRef(tickets);
+  useEffect(() => {
+    ticketsRef.current = tickets;
+  }, [tickets]);
+
+  // PHASE 8: Direct Manual Sync logic (Additive Only)
+  const handleDirectSync = useCallback(async (setSyncingStatus?: (msg: string) => void) => {
+    const url = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit`;
+    
+    try {
+      if (setSyncingStatus) setSyncingStatus('Connecting to Google Sheets...');
+      
+      const parsedTickets = await syncFromGoogleSheet(url, setSyncingStatus);
+      
+      const existingIds = new Set(ticketsRef.current.map(t => t.ticketId.trim().toUpperCase()));
+      const newItems = parsedTickets.filter(t => !existingIds.has(t.ticketId.trim().toUpperCase()));
+      
+      if (newItems.length > 0) {
+        const sanitizedNewItems = newItems.map(t => ({
+          ...t,
+          id: t.id || `t-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+          createdAt: t.createdAt || new Date().toISOString()
+        }));
+
+        setTickets(prev => [...sanitizedNewItems, ...prev]);
+        
+        addAuditLog(
+          'Import',
+          'Incremental spreadsheet sync',
+          `Automated/Manual Sync merged ${sanitizedNewItems.length} new records from Google Sheets.`
+        );
+        
+        triggerNotification(`Synced ${sanitizedNewItems.length} new entries from Master Sheet.`, 'success');
+      } else {
+        triggerNotification('Master Sheet is already up-to-date. No new entries found.', 'info');
+      }
+      
+      // Update last sync time securely handling quota exceeded
+      try {
+        localStorage.setItem('last_sync_timestamp', new Date().toISOString());
+      } catch (err) {
+        console.warn('Unable to save sync timestamp to localStorage', err);
+      }
+      
+      if (setSyncingStatus) setSyncingStatus('');
+    } catch (err: any) {
+      if (setSyncingStatus) setSyncingStatus('');
+      triggerNotification(`Sync failed: ${err.message || err}`, 'error');
+    }
+  }, [addAuditLog, triggerNotification]);
+
+  // PHASE 8: Automated Background Sync Interval (Every 30 mins, 10am-6pm)
+  useEffect(() => {
+    const checkAndSync = () => {
+      const now = new Date();
+      const hours = now.getHours();
+      
+      // Only run between 10:00 (10) and 18:00 (6 PM) inclusive
+      if (hours >= 10 && hours <= 18) {
+        const lastSync = localStorage.getItem('last_sync_timestamp');
+        
+        let shouldSync = true;
+        if (lastSync) {
+          const lastSyncDate = new Date(lastSync);
+          const diffMins = (now.getTime() - lastSyncDate.getTime()) / (1000 * 60);
+          if (diffMins < 30) {
+            shouldSync = false;
+          }
+        }
+        
+        if (shouldSync) {
+          console.log('Running automated background sync...');
+          handleDirectSync();
+        }
+      }
+    };
+    
+    // Check every minute
+    const intervalId = setInterval(checkAndSync, 60 * 1000);
+    
+    // Run an initial check on mount as well (only runs once on mount)
+    checkAndSync();
+    
+    return () => clearInterval(intervalId);
+  }, []); // Empty dependency array: interval mounts once and reads fresh state via refs
+
+  // PHASE 8: Refresh icon fix - reload tickets from localStorage
+  const handleRefreshData = useCallback(() => {
+    const saved = localStorage.getItem('corporate_tickets');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        setTickets(parsed);
+        triggerNotification('Data successfully refreshed from local storage.', 'success');
+      } catch (e) {
+        triggerNotification('Error parsing stored data during refresh.', 'error');
+      }
+    }
+  }, [triggerNotification]);
+
+  const handleClearAll = useCallback(() => {
+    if (confirm('WARNING: Are you absolutely sure you want to clear all tickets? This cannot be undone.')) {
+      setTickets([]);
+      setEditingTicket(null);
+
+      addAuditLog(
+        'Clear All',
+        'Database Flush',
+        'Cleared all active ticket records.'
+      );
+
+      triggerNotification('Cleared all active tracking tickets. Sandbox reset complete.', 'info');
+    }
+  }, [addAuditLog, triggerNotification]);
+
+  const handleClearLogs = () => {
+    setAuditLogs([]);
+    triggerNotification('Cleared historical audit Trail.', 'info');
+  };
+
+  const handleDeleteLogEntry = (logId: string) => {
+    setAuditLogs(prev => prev.filter(log => log.id !== logId));
+    triggerNotification('Log entry permanently deleted.', 'info');
+  };
+
+  // Admin Region list modification handlers
+  const handleAddRegion = useCallback((name: string) => {
+    setRegions(prev => [...prev, name]);
+    triggerNotification(`Added custom region: ${name}`, 'success');
+  }, [triggerNotification]);
+
+  const handleRemoveRegion = useCallback((name: string) => {
+    setRegions(prev => prev.filter(r => r !== name));
+    triggerNotification(`Removed region: ${name}`, 'info');
+  }, [triggerNotification]);
+
+  // Filter counters for navigation bar alerts
+  const todayStr = new Date().toISOString().split('T')[0];
+
+  // Data isolation counters
+  const isolationTickets = useMemo(() => {
+    if (!currentUser) return [];
+    if (currentUser.role === 'Admin') return tickets;
+    if (currentUser.team === 'Both' && currentUser.loginTeam) {
+      return tickets.filter(t => t.team === currentUser.loginTeam);
+    }
+    return tickets.filter(t => t.team === currentUser.team);
+  }, [tickets, currentUser]);
+
+  const pendingCount = useMemo(() => {
+    return isolationTickets.filter(t => t.status !== 'Delivered').length;
+  }, [isolationTickets]);
+
+  const overdueCount = useMemo(() => {
+    return isolationTickets.filter(t => t.status !== 'Delivered' && t.dueDate < todayStr).length;
+  }, [isolationTickets, todayStr]);
+
+  const myTasks = useMemo(() => {
+    return isolationTickets.filter(t => 
+      t.assignedTo === currentUser?.fullName || t.reviewerName === currentUser?.fullName
+    );
+  }, [isolationTickets, currentUser]);
+
+  const teamTasksToday = useMemo(() => {
+    return isolationTickets.filter(t => t.dueDate === todayStr);
+  }, [isolationTickets, todayStr]);
+
+  if (!currentUser) {
+    return (
+      <LoginSignup
+        onLoginSuccess={(user) => {
+          setCurrentUser(user);
+          localStorage.setItem('current_logged_in_user', JSON.stringify(user));
+          triggerNotification(`Welcome back, ${user.fullName}!`, 'success');
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col font-sans" id="app-root-container">
+
+      {/* Dynamic Notification Toast */}
+      {notification && (
+        <div
+          className={`fixed bottom-5 right-5 z-50 px-4 py-3.5 rounded-2xl shadow-2xl flex items-center gap-2.5 max-w-md animate-fade-in border text-xs font-bold ${notification.type === 'success'
+            ? 'bg-emerald-600 border-mettl-green text-white'
+            : notification.type === 'error'
+              ? 'bg-rose-600 border-rose-500 text-white'
+              : 'bg-mettl-blue border-mettl-blue-dark text-white'
+            }`}
+          id="toast-notification"
+        >
+          <AlertCircle size={15} />
+          <span>{notification.text}</span>
+        </div>
+      )}
+
+      {/* Main Corporate Header Panel - Mettl Brand Gradient backing */}
+      <header className="bg-mettl-gradient text-white sticky top-0 z-40 shadow-sm" id="app-header">
+        <div className="max-w-[1920px] w-full mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            {/* Home Button — Phase 2 */}
+            <button
+              onClick={() => {
+                setActiveTab(currentUser.role === 'Admin' ? 'dashboard' : 'myTasks');
+                setEditingTicket(null);
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 bg-white/10 hover:bg-white/20 text-white text-xs font-semibold rounded-xl border border-white/20 transition-all cursor-pointer"
+              title="Go to Home / Dashboard"
+              id="header-home-btn"
+            >
+              <Home size={14} />
+              <span className="hidden sm:inline">Home</span>
+            </button>
+            <div className="p-2 bg-mettl-blue-light0 text-white rounded-lg shadow-sm">
+              <Briefcase size={18} id="brand-logo-icon" className="stroke-[2.5]" />
+            </div>
+            <div>
+              <h1 className="font-bold text-white tracking-tight text-base sm:text-lg flex items-center gap-2">
+                Psychometric Deliverable Tracker
+              </h1>
+            </div>
+          </div>
+
+          {/* User Session Info Header widget */}
+          <div className="flex items-center gap-3.5" id="user-header-panel">
+            {/* Quick Header EOD Alarm/Indicator */}
+            {currentUser.role === 'Admin' && (
+              <div
+                onClick={() => {
+                  setActiveTab('eod');
+                  setEditingTicket(null);
+                }}
+                className={`cursor-pointer px-3 py-1.5 rounded-xl border flex items-center gap-2 transition-all hover:bg-white/10 ${overdueCount > 0
+                  ? 'bg-rose-500/25 border-rose-400 text-rose-100 font-bold'
+                  : pendingCount > 0
+                    ? 'bg-amber-500/25 border-amber-400 text-amber-100 font-bold'
+                    : 'bg-white/10 border-white/20 text-white'
+                  }`}
+                id="header-deadline-indicator"
+                title="Click to view 8:00 PM End of Day Report Panel"
+              >
+                <Clock size={14} className={pendingCount > 0 ? 'animate-pulse text-amber-300' : ''} />
+                <span className="text-xs font-mono hidden sm:inline">
+                  {pendingCount === 0
+                    ? 'All Cleared!'
+                    : `${pendingCount} Pending (${overdueCount} Overdue)`}
+                </span>
+                <span className="text-[10px] font-bold bg-white text-mettl-blue px-1.5 py-0.5 rounded-md">
+                  8 PM EOD
+                </span>
+              </div>
+            )}
+
+            {/* Profile Dropdown widget */}
+            <div className="flex items-center gap-2 bg-white/5 p-1.5 rounded-xl border border-white/10" id="user-profile-badge">
+              <span className={`p-1.5 rounded-lg text-mettl-blue ${currentUser.role === 'Admin' ? 'bg-white' : 'bg-slate-300'}`}>
+                {currentUser.role === 'Admin' ? <Shield size={14} /> : <UserIcon size={14} />}
+              </span>
+              <div className="hidden md:block text-left pr-1 font-sans select-none">
+                <div className="text-[11px] font-extrabold text-white leading-none">{currentUser.fullName}</div>
+                <div className="text-[9px] font-mono text-emerald-300 font-bold mt-0.5">
+                  Role: {currentUser.role} ({currentUser.team === 'Both' ? currentUser.loginTeam : currentUser.team} Isolation)
+                </div>
+              </div>
+
+              <button
+                onClick={handleLogout}
+                className="p-1.5 hover:bg-white/10 text-white/75 hover:text-white rounded-lg transition-colors cursor-pointer"
+                title="Log Out of Tracker Hub"
+                id="header-logout-btn"
+              >
+                <LogOut size={14} />
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Primary Dashboard Container */}
+      <main className="flex-1 max-w-[1920px] w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 animate-fade-in" id="dashboard-main-content">
+
+        {/* Dynamic KPI Overview metrics ribbon */}
+        <StatsOverview tickets={isolationTickets} />
+
+        {/* Tab Selection Interface - Atlantis Green bottom underline for active state */}
+        <div className="flex items-center justify-between border-b border-slate-200 pb-px" id="tabs-bar">
+          <div className="flex space-x-1 sm:space-x-2 overflow-x-auto" id="tabs-group">
+
+            {/* My Tasks Tab (Hidden from Admin) */}
+            {currentUser.role !== 'Admin' && (
+              <button
+                onClick={() => {
+                  setActiveTab('myTasks');
+                  setEditingTicket(null);
+                }}
+                className={`py-3 px-4 text-xs sm:text-sm font-bold flex items-center gap-2 border-b-2 transition-all whitespace-nowrap cursor-pointer ${activeTab === 'myTasks'
+                  ? 'border-mettl-blue-light0 text-mettl-blue'
+                  : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
+                  }`}
+                id="tab-btn-mytasks"
+              >
+                <Briefcase size={16} />
+                My Tasks
+              </button>
+            )}
+
+            {/* Team Tasks Tab */}
+            <button
+              onClick={() => {
+                setActiveTab('teamTasks');
+                setEditingTicket(null);
+              }}
+              className={`py-3 px-4 text-xs sm:text-sm font-bold flex items-center gap-2 border-b-2 transition-all whitespace-nowrap cursor-pointer ${activeTab === 'teamTasks'
+                ? 'border-mettl-blue-light0 text-mettl-blue'
+                : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
+                }`}
+              id="tab-btn-teamtasks"
+            >
+              <UserIcon size={16} />
+              Team's Tasks Today
+            </button>
+
+            {/* Sheet Tab (Available to all) */}
+            <button
+              onClick={() => {
+                setActiveTab('sheet');
+                setEditingTicket(null);
+              }}
+              className={`py-3 px-4 text-xs sm:text-sm font-bold flex items-center gap-2 border-b-2 transition-all whitespace-nowrap cursor-pointer ${activeTab === 'sheet'
+                ? 'border-mettl-blue-light0 text-mettl-blue'
+                : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
+                }`}
+              id="tab-btn-sheet"
+            >
+              <FileSpreadsheet size={16} />
+              Tasks
+            </button>
+
+            {/* Admin Dashboard Tab (Admin Only - Section 8: "Team Members never see this view") */}
+            {currentUser.role === 'Admin' && (
+              <>
+                <button
+                  onClick={() => {
+                    setActiveTab('bandwidth');
+                    setEditingTicket(null);
+                  }}
+                  className={`py-3 px-4 text-xs sm:text-sm font-bold flex items-center gap-2 border-b-2 transition-all whitespace-nowrap cursor-pointer ${activeTab === 'bandwidth'
+                    ? 'border-mettl-blue-light0 text-mettl-blue'
+                    : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
+                    }`}
+                  id="tab-btn-bandwidth"
+                >
+                  <Users size={16} />
+                  Bandwidth
+                </button>
+
+                <button
+                  onClick={() => {
+                    setActiveTab('dashboard');
+                    setEditingTicket(null);
+                  }}
+                  className={`py-3 px-4 text-xs sm:text-sm font-bold flex items-center gap-2 border-b-2 transition-all whitespace-nowrap cursor-pointer ${activeTab === 'dashboard'
+                    ? 'border-mettl-blue-light0 text-mettl-blue'
+                    : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
+                    }`}
+                  id="tab-btn-dashboard"
+                >
+                  <BarChart3 size={16} />
+                  Dashboard
+                </button>
+
+                <button
+                  onClick={() => {
+                    setActiveTab('accounts');
+                    setEditingTicket(null);
+                  }}
+                  className={`py-3 px-4 text-xs sm:text-sm font-bold flex items-center gap-2 border-b-2 transition-all whitespace-nowrap cursor-pointer ${activeTab === 'accounts'
+                    ? 'border-mettl-blue-light0 text-mettl-blue'
+                    : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
+                    }`}
+                  id="tab-btn-accounts"
+                >
+                  <UserIcon size={16} />
+                  Accounts
+                </button>
+
+                {/* Notifications (Admin Only) */}
+                <button
+                  onClick={() => {
+                    setActiveTab('notifications');
+                    setEditingTicket(null);
+                    // Mark all as read when tab is opened
+                    setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+                  }}
+                  className={`py-3 px-4 text-xs sm:text-sm font-bold flex items-center gap-2 border-b-2 transition-all relative whitespace-nowrap cursor-pointer ${activeTab === 'notifications'
+                    ? 'border-mettl-blue-light0 text-mettl-blue'
+                    : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
+                    }`}
+                  id="tab-btn-notifications"
+                >
+                  <Bell size={16} />
+                  Notifications
+                  {notifications.filter(n => !n.isRead).length > 0 && (
+                    <span className="bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-sm animate-pulse ml-1">
+                      +{notifications.filter(n => !n.isRead).length}
+                    </span>
+                  )}
+                </button>
+                {/* Reports / EOD Tab (Admin Only) */}
+                <button
+                  onClick={() => {
+                    setActiveTab('eod');
+                    setEditingTicket(null);
+                  }}
+                  className={`py-3 px-4 text-xs sm:text-sm font-bold flex items-center gap-2 border-b-2 transition-all relative whitespace-nowrap cursor-pointer ${activeTab === 'eod'
+                    ? 'border-mettl-blue-light0 text-mettl-blue'
+                    : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
+                    }`}
+                  id="tab-btn-eod"
+                >
+                  <Clock size={16} />
+                  Reports
+                  {pendingCount > 0 && (
+                    <span className="absolute -top-1 -right-1 flex h-4.5 w-4.5 items-center justify-center rounded-full bg-rose-600 text-[9px] font-extrabold text-white ring-2 ring-white animate-pulse">
+                      {pendingCount}
+                    </span>
+                  )}
+                </button>
+              </>
+            )}
+
+            {/* Changes Audit Logs (Available to all) */}
+            <button
+              onClick={() => {
+                setActiveTab('logs');
+                setEditingTicket(null);
+              }}
+              className={`py-3 px-4 text-xs sm:text-sm font-bold flex items-center gap-2 border-b-2 transition-all whitespace-nowrap relative cursor-pointer ${activeTab === 'logs'
+                ? 'border-mettl-blue-light0 text-mettl-blue'
+                : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
+                }`}
+              id="tab-btn-logs"
+            >
+              <History size={16} />
+              Audit Trail
+              <span className={`px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase scale-90 ml-1.5 ${currentUser.role === 'Admin' ? 'bg-mettl-green-light text-emerald-700' : 'bg-slate-100 text-slate-600'
+                }`}>
+                {currentUser.role === 'Admin' ? 'Admin' : 'Read-Only'}
+              </span>
+            </button>
+          </div>
+
+          <div className="hidden sm:flex items-center gap-1.5 text-xs text-slate-400 font-mono" id="operational-tag">
+            <span className="w-2 h-2 rounded-full bg-mettl-blue animate-pulse" />
+            Emp Name: <strong className="text-slate-600 font-bold">{currentUser.fullName}</strong>
+          </div>
+        </div>
+
+        {/* Tab Contents Switching Viewport */}
+        <div className="transition-all duration-300" id="tab-content-viewport">
+
+          {/* MY TASKS PANEL */}
+          {activeTab === 'myTasks' && (
+            <div className="space-y-6" id="my-tasks-tab-grid">
+              <div className="w-full flex flex-col h-full">
+                <DeliverableTable
+                  tickets={myTasks}
+                  currentUser={currentUser}
+                  onEdit={handleEditTicket}
+                  onDelete={handleDeleteTicket}
+                  onClearAll={handleClearAll}
+                  regions={regions}
+                  onAddRegion={handleAddRegion}
+                  onRemoveRegion={handleRemoveRegion}
+                  onAddClick={handleAddTicket}
+                  onSyncMaster={handleDirectSync}
+                  onRefresh={handleRefreshData}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* TEAM TASKS TODAY PANEL */}
+          {activeTab === 'teamTasks' && (
+            <div className="space-y-6" id="team-tasks-tab-grid">
+              <div className="w-full flex flex-col h-full">
+                <DeliverableTable
+                  tickets={teamTasksToday}
+                  currentUser={currentUser}
+                  onEdit={handleEditTicket}
+                  onDelete={handleDeleteTicket}
+                  onClearAll={handleClearAll}
+                  regions={regions}
+                  onAddRegion={handleAddRegion}
+                  onRemoveRegion={handleRemoveRegion}
+                  onAddClick={handleAddTicket}
+                  onSyncMaster={handleDirectSync}
+                  onRefresh={handleRefreshData}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* 1. SPREADSHEET TABLE PANEL */}
+          {activeTab === 'sheet' && (
+            <div className="space-y-6" id="spreadsheet-tab-grid">
+
+              {/* Deliverable/Ticket table taking full width */}
+              <div className="w-full flex flex-col h-full">
+                <DeliverableTable
+                  tickets={isolationTickets}
+                  currentUser={currentUser}
+                  onEdit={handleEditTicket}
+                  onDelete={handleDeleteTicket}
+                  onClearAll={handleClearAll}
+                  regions={regions}
+                  onAddRegion={handleAddRegion}
+                  onRemoveRegion={handleRemoveRegion}
+                  onAddClick={handleAddTicket}
+                  onSyncMaster={handleDirectSync}
+                  onRefresh={handleRefreshData}
+                />
+              </div>
+
+            </div>
+          )}
+
+          {/* 2. REAL-TIME ANALYTICS DASHBOARD PANEL (Admin Only) */}
+          {activeTab === 'dashboard' && currentUser.role === 'Admin' && (
+            <AnalyticsDashboard tickets={tickets} />
+          )}
+
+          {/* Admin Bandwidth Dashboard */}
+          {activeTab === 'bandwidth' && currentUser.role === 'Admin' && (
+            <div className="w-full h-[70vh]" id="bandwidth-tab-panel">
+              <AdminBandwidthPanel tickets={tickets} />
+            </div>
+          )}
+
+          {/* 3. 5:00 PM EOD STATUS DISPATCH REPORT PANEL */}
+          {activeTab === 'eod' && (
+            <div className="max-w-4xl mx-auto" id="eod-tab-panel">
+              <EodReportPanel tickets={isolationTickets} />
+            </div>
+          )}
+
+          {/* 4. HISTORICAL CHANGE AUDIT Trail */}
+          {activeTab === 'logs' && (
+            <AuditLogsTable
+              logs={auditLogs}
+              currentUser={currentUser}
+              onClearLogs={handleClearLogs}
+              onDeleteLog={handleDeleteLogEntry}
+            />
+          )}
+
+          {/* 5. ADMIN PORTAL USER ACCOUNTS PANEL */}
+          {activeTab === 'accounts' && currentUser.role === 'Admin' && (
+            <AdminAccountsPanel
+              currentUser={currentUser}
+              triggerNotification={triggerNotification}
+            />
+          )}
+
+          {/* 6. ADMIN NOTIFICATIONS PANEL */}
+          {activeTab === 'notifications' && currentUser.role === 'Admin' && (
+            <AdminNotificationsPanel
+              notifications={notifications}
+              onClearAll={() => setNotifications([])}
+              onDeleteNotification={(id) => setNotifications(prev => prev.filter(n => n.id !== id))}
+              currentUser={currentUser}
+            />
+          )}
+
+        </div>
+
+      </main>
+
+      {/* Footer Branding Area */}
+      <footer className="mt-auto bg-white border-t border-slate-200 py-6 select-none" id="app-footer">
+        <div className="max-w-[1920px] w-full mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs font-mono text-slate-400">
+          <span className="font-semibold text-slate-500">
+            Psychometric Deliverable Tracker
+          </span>
+          <div className="flex items-center gap-3 font-bold text-slate-400">
+            <span>Designed by Psychometric Team</span>
+          </div>
+        </div>
+      </footer>
+
+      {/* 5. REDESIGNED TICKET CREATION / EDITING MODAL DIALOG */}
+      {isFormModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-md overflow-y-auto animate-fade-in" id="form-modal-overlay">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto relative animate-scale-in border border-slate-200 flex flex-col" id="form-modal-container">
+            {/* Modal Header */}
+            <div className="sticky top-0 bg-white z-10 px-6 py-4.5 border-b border-slate-100 flex items-center justify-between" id="form-modal-header">
+              <div className="flex items-center gap-3">
+                <span className="p-2 bg-mettl-blue-light text-mettl-blue rounded-xl">
+                  <Briefcase size={20} className="stroke-[2.5]" />
+                </span>
+                <div>
+                  <h3 className="font-extrabold text-slate-800 text-sm sm:text-base leading-snug">
+                    {editingTicket ? `Edit Deliverable: ${editingTicket.ticketId}` : 'New Deliverable'}
+                  </h3>
+                  <p className="text-[11px] text-slate-400 font-medium">
+                    {editingTicket ? 'Update deliverable details.' : 'Create a new deliverable tracker.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setEditingTicket(null);
+                  setIsFormModalOpen(false);
+                }}
+                className="p-2 hover:bg-slate-100 text-slate-400 hover:text-slate-600 rounded-xl transition-colors cursor-pointer"
+                title="Dismiss Form Dialog"
+                id="close-modal-header-btn"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Modal Content container */}
+            <div className="p-6 overflow-y-auto" id="form-modal-body">
+              <DeliverableForm
+                onAdd={handleFormSubmit}
+                onUpdate={handleFormSubmit}
+                editingTicket={editingTicket}
+                existingTickets={tickets}
+                cancelEdit={() => {
+                  setEditingTicket(null);
+                  setIsFormModalOpen(false);
+                }}
+                currentUser={currentUser}
+                regions={regions}
+                isModal={true}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}

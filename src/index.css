@@ -1,0 +1,34 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Corporate Theme Colors & Psychometrically calming additions */
+  --color-mettl-green: #89CE39;        /* Atlantis Green */
+  --color-mettl-green-hover: #78be2a;  
+  --color-mettl-green-light: #f3f9eb;  
+  --color-mettl-blue: #009de0;         /* Mettl Cyan */
+  --color-mettl-blue-dark: #007bb0;    
+  --color-mettl-blue-light: #e6f6fc;   
+  --color-mettl-purple: #8246af;       /* Mettl Purple */
+  --color-near-black: #1a1a1a;         
+}
+
+.bg-mettl-gradient {
+  background: linear-gradient(45deg, #009de0 30%, #8246af 90%) !important;
+}
+
+.text-mettl-gradient {
+  background: linear-gradient(45deg, #009de0 30%, #8246af 90%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #f7fafc; /* Keep background extremely light & restful */
+  color: var(--color-near-black);
+}
+

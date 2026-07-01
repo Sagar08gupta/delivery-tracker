@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: psychometric-delivery-tracker
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: node excel-server.js
+    envVars:
+      - key: VITE_API_TOKEN
+        generateValue: true
