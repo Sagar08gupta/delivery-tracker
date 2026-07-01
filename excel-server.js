@@ -215,8 +215,14 @@ app.get('/api/excel-status', requireAuth, (req, res) => {
   }
 });
 
-const PORT = 3001;
-app.listen(PORT, () => {
-  console.log(`📁 Excel API server running at http://localhost:${PORT}`);
-  console.log(`   Excel file location: ${EXCEL_FILE}`);
+const PORT = process.env.PORT || 3001;
+app.use(express.static(path.join(__dirname, 'dist')));
+
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
+
+app.listen(PORT, () => {
+  console.log(`📁 API server running at http://localhost:${PORT}`);
+});
+
